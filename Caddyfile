@@ -1,0 +1,54 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode gzip
+
+	header {
+		# HTTPS is the only supported transport; pin it for a year.
+		Strict-Transport-Security "max-age=31536000"
+		# Don't let browsers MIME-sniff responses into a different type.
+		X-Content-Type-Options "nosniff"
+		# Don't leak the (token-bearing) URL to any third party.
+		Referrer-Policy "no-referrer"
+		# Lock down where scripts/styles/connections can come from. The app
+		# is fully same-origin except Telegram's own web-app.js. If the Mini
+		# App ever fails to OPEN inside Telegram Web (not Desktop/mobile,
+		# which load it top-level and are unaffected), the likely culprit is
+		# frame-ancestors — widen it to the client's origin or drop that
+		# directive.
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org"
+		# Don't advertise the server software.
+		-Server
+	}
+
+	# `handle` blocks are mutually exclusive and evaluated in order.
+	# Target is `ipsec`, not `backend`: backend runs with
+	# `network_mode: "service:ipsec"` (see docker-compose.yml), so it has no
+	# network identity of its own on the `internal` bridge network — only
+	# the container that owns the shared namespace (ipsec) is reachable by
+	# name, and backend's port 8000 is reachable through it.
+	handle /api/* {
+		reverse_proxy ipsec:8000
+	}
+
+	# Hashed build assets (filenames change every build) — safe to cache
+	# forever.
+	handle /assets/* {
+		root * /srv/app
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# Everything else — index.html, theme-init.js, open.html/open.js — must
+	# NOT be cached, or Telegram's WebView keeps serving a stale app and new
+	# deploys never take effect (this is why earlier fixes appeared to do
+	# nothing on the phone).
+	handle {
+		root * /srv/app
+		header Cache-Control "no-store"
+		try_files {path} /index.html
+		file_server
+	}
+}

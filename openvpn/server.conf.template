@@ -1,0 +1,35 @@
+port ${OVPN_PORT}
+proto tcp-server
+dev tun
+topology subnet
+
+ca /etc/openvpn/data/pki/ca.crt
+cert /etc/openvpn/data/pki/issued/server.crt
+key /etc/openvpn/data/pki/private/server.key
+dh /etc/openvpn/data/pki/dh.pem
+tls-crypt /etc/openvpn/data/ta.key
+crl-verify /etc/openvpn/data/pki/crl.pem
+
+server ${OVPN_NETWORK} ${OVPN_NETMASK}
+# Each client gets its own CN (no duplicate-cn) so the management
+# interface's `kill <CN>` and easyrsa's per-CN revoke both target exactly
+# one device — see backend/app/openvpn_manager.py.
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS ${OVPN_DNS}"
+
+cipher AES-256-GCM
+auth SHA256
+keepalive 10 60
+persist-key
+persist-tun
+
+# Loopback-only, reached by the backend container over the shared network
+# namespace (network_mode: service:openvpn) — never exposed publicly.
+management 127.0.0.1 ${OVPN_MGMT_PORT}
+
+# Cloak forwards already-decrypted TCP here (see cloak/ProxyBook) — this
+# process itself only ever listens on loopback, never on a public port.
+local 127.0.0.1
+
+verb 3
+explicit-exit-notify 1

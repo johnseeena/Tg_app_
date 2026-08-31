@@ -1,0 +1,152 @@
+name: amnezia-tg-app
+
+x-restart: &restart unless-stopped
+
+services:
+  # IKEv2/IPsec (Libreswan), using Amnezia's own maintained server image
+  # (amneziavpn/ipsec-server — a fork of the well-known hwdsl2/docker-
+  # ipsec-vpn-server project) so we get byte-for-byte compatibility with
+  # what the Amnezia app's own self-hosted installer produces: same CA
+  # naming ("IKEv2 VPN CA"), same NSS cert-store layout, same client
+  # cert/.p12 export commands (verified against amnezia-client's
+  # ikev2Configurator.cpp) — Amnezia's own vpn:// native import for this
+  # container type is NOT deprecated (unlike Cloak, see PLAN.md's 2026-07-21
+  # entry for why OpenVPN+Cloak was abandoned before ever being deployed).
+  #
+  # Different port family entirely from everything tried earlier today:
+  # UDP 500 (IKE) + 4500 (NAT-T), not TCP 443 — a real, standard VPN dial
+  # protocol that many networks (including carrier ones, for MDM/corporate
+  # profile compatibility) can't block without breaking legitimate
+  # non-VPN uses. No SNI/port-sharing tricks needed with Caddy as a result.
+  #
+  # --privileged (not just NET_ADMIN) because Libreswan's kernel IPsec
+  # (XFRM) integration needs broader host-networking access than a
+  # userspace tun/tap interface does — confirmed necessary via local
+  # testing, matches what Amnezia's own run_container.sh grants.
+  ipsec:
+    build: ./ipsec
+    restart: *restart
+    privileged: true
+    ports:
+      - "500:500/udp"
+      - "4500:4500/udp"
+    environment:
+      - IPSEC_SERVER_IP=${IPSEC_ENDPOINT_HOST:-}
+      - IPSEC_NETWORK=${IPSEC_NETWORK:-192.168.44.0/24}
+      - IPSEC_POOL_START=${IPSEC_POOL_START:-192.168.44.10}
+      - IPSEC_POOL_END=${IPSEC_POOL_END:-192.168.44.250}
+      - IPSEC_DNS=${IPSEC_DNS:-1.1.1.1,8.8.8.8}
+      - IPSEC_EXTERNAL_IF=${IPSEC_EXTERNAL_IF:-eth0}
+      # L2TP/IPsec for router clients (Keenetic etc.) — only enabled when
+      # L2TP_PSK is non-empty. Shared single credential, see ipsec/entrypoint.sh.
+      - L2TP_PSK=${L2TP_PSK:-}
+      - L2TP_USER=${L2TP_USER:-vpnrouter}
+      - L2TP_PASSWORD=${L2TP_PASSWORD:-}
+      - L2TP_NET=${L2TP_NET:-192.168.42.0/24}
+      - L2TP_LOCAL_IP=${L2TP_LOCAL_IP:-192.168.42.1}
+      - L2TP_POOL=${L2TP_POOL:-192.168.42.10-192.168.42.250}
+    volumes:
+      # Read-write: the backend runs `certutil`/`pk12util` directly against
+      # this same NSS cert database (issue/delete client certs) — see
+      # backend/app/ikev2_manager.py. No network API for this the way
+      # xray/Cloak had one, so a shared volume is the mechanism instead
+      # (backend serializes its own concurrent mutations in-process; NSS's
+      # sqlite backend handles the rest).
+      - ipsec-data:/etc/ipsec.d
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep pluto > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: *restart
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend shares ipsec's network namespace purely so it can reach the
+  # NSS cert database volume with matching NSS library versions and, if
+  # ever needed, query pluto's own status socket — not for any port-sharing
+  # reason this time (IKEv2 lives on its own UDP ports, unrelated to
+  # Caddy's 80/443).
+  #
+  # Gotcha (carried over, same underlying cause each time): restarting
+  # `ipsec` tears down and recreates its network namespace, orphaning
+  # backend's network stack (it joined the OLD namespace) — always
+  # `docker compose up -d --force-recreate backend` right after any
+  # `docker compose up -d --force-recreate ipsec` / ipsec image rebuild.
+  backend:
+    build: ./backend
+    restart: *restart
+    network_mode: "service:ipsec"
+    depends_on:
+      ipsec:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ADMIN_IDS=${TELEGRAM_ADMIN_IDS}
+      - DOMAIN=${DOMAIN}
+      - IPSEC_ENDPOINT_HOST=${IPSEC_ENDPOINT_HOST:-}
+      - MAX_DEVICES_PER_USER=${MAX_DEVICES_PER_USER:-5}
+    volumes:
+      - ipsec-data:/etc/ipsec.d
+
+  # Builds the Mini App's static assets and copies them into frontend-dist,
+  # then exits — it's not a long-running service. Re-run
+  # `docker compose up frontend-build` (or `up -d`, which builds it as part
+  # of the normal dependency graph) after any frontend change.
+  frontend-build:
+    build: ./frontend
+    volumes:
+      - frontend-dist:/output
+
+  caddy:
+    image: caddy:2-alpine
+    restart: *restart
+    # Back to publishing 443 directly — IKEv2 lives on UDP 500/4500, no
+    # port-sharing with the Mini App needed this time.
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      - frontend-dist:/srv/app:ro
+    depends_on:
+      frontend-build:
+        condition: service_completed_successfully
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  ipsec-data:
+  pg-data:
+  caddy-data:
+  caddy-config:
+  frontend-dist:

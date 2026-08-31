@@ -1,0 +1,11 @@
+{
+  "ProxyBook": {
+    "openvpn": ["tcp", "127.0.0.1:${OVPN_PORT}"]
+  },
+  "BindAddr": [":${CLOAK_PORT}"],
+  "BypassUID": [],
+  "RedirAddr": "${CLOAK_REDIR_ADDR}",
+  "PrivateKey": "${CLOAK_PRIVATE_KEY}",
+  "AdminUID": "${CLOAK_ADMIN_UID}",
+  "DatabasePath": "/etc/cloak/data/userinfo.db"
+}

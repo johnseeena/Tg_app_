@@ -1,0 +1,19 @@
+# LOCAL DEV ONLY — DO NOT DEPLOY THIS FILE TO THE PRODUCTION SERVER.
+#
+# Publishes the backend's port directly (unencrypted, no auth boundary
+# beyond the app itself) so the Vite dev server (frontend/vite.config.ts)
+# can proxy /api to it without going through Caddy/TLS. Docker Compose
+# picks up docker-compose.override.yml automatically whenever it's present
+# next to docker-compose.yml — if this file ends up on the server (e.g. a
+# careless `rsync`/`git clone` that doesn't exclude it), it exposes the
+# backend API over plain HTTP on port 8000 to anyone who can reach the
+# host, bypassing Caddy entirely. See docs/DEPLOY.md step 3, which
+# excludes this file explicitly.
+services:
+  # Published on `ipsec`, not `backend`: backend runs with
+  # `network_mode: "service:ipsec"` (see docker-compose.yml) so it has no
+  # port-mapping of its own — only the namespace owner (ipsec) can publish
+  # ports that reach backend's listener.
+  ipsec:
+    ports:
+      - "8000:8000"
